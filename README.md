@@ -118,8 +118,6 @@ QueueMesh/
 │   │   └── index.py               # Controller Lambda (Boto3, DynamoDB, retry backoff)
 │   └── telemetry/
 │       └── worker_mock.py         # Worker Lambda with CloudWatch EMF telemetry generator
-├── docs/
-│   └── QueueMeshPRD.md            # Product Master & Technical Architecture Document
 ├── samconfig.toml                 # SAM deployment configuration
 ├── .gitignore                     # Git ignore rules (SAM, Python, credentials)
 └── README.md                      # Project documentation
