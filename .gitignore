@@ -1,0 +1,32 @@
+# AWS SAM build artifacts
+.aws-sam/
+
+# Python cache & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+venv/
+ENV/
+
+# Temporary / test artifacts
+*.zip
+response.json
+test_*.json
+
+# Security & Credentials
+*.csv
+*credentials*
+*accessKeys*
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# docs/
+docs/
