@@ -1,0 +1,255 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  QueueMesh - Serverless Adaptive Backpressure Controller.
+  Dynamically throttles SQS-to-Lambda Event Source Mapping concurrency based
+  on real-time downstream HTTP error telemetry using the AIMD algorithm.
+
+# ============================================================
+# GLOBAL DEFAULTS applied to all AWS::Serverless::Function resources
+# ============================================================
+Globals:
+  Function:
+    Runtime: python3.11
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        POWERTOOLS_SERVICE_NAME: QueueMesh
+        LOG_LEVEL: INFO
+
+# ============================================================
+# PARAMETERS - override at deploy time via --parameter-overrides
+# ============================================================
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment name
+
+  BaselineMaxConcurrency:
+    Type: Number
+    Default: 100
+    MinValue: 2
+    MaxValue: 1000
+    Description: Starting / ceiling MaximumConcurrency for the worker ESM
+
+  AIMDAlpha:
+    Type: Number
+    Default: 5
+    Description: Additive Increase step size (workers to add per healthy cycle)
+
+  AIMDBeta:
+    Type: String
+    Default: "0.5"
+    Description: Multiplicative Decrease factor applied on 429 detection
+
+  T1Threshold:
+    Type: String
+    Default: "0.05"
+    Description: Error-rate threshold (0.0-1.0) that triggers multiplicative decrease
+
+  T2Threshold:
+    Type: String
+    Default: "0.98"
+    Description: Success-rate threshold (0.0-1.0) that triggers additive increase
+
+  CMin:
+    Type: Number
+    Default: 2
+    Description: Minimum concurrency floor (cannot drop below this)
+
+# ============================================================
+# RESOURCES
+# ============================================================
+Resources:
+
+  # ----------------------------------------------------------
+  # 1. DYNAMODB - QueueMesh State Ledger (Single-Table Design)
+  # ----------------------------------------------------------
+  QueueMeshStateLedger:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "QueueMeshStateLedger-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: QueueMesh
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ----------------------------------------------------------
+  # 2. SQS - Target queue that the worker Lambda drains
+  # ----------------------------------------------------------
+  TargetSQSQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "QueueMesh-TargetQueue-${Environment}"
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TargetSQSDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: QueueMesh
+        - Key: Environment
+          Value: !Ref Environment
+
+  TargetSQSDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "QueueMesh-TargetQueue-DLQ-${Environment}"
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Project
+          Value: QueueMesh
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ----------------------------------------------------------
+  # 3. WORKER LAMBDA - Processes SQS messages & emits EMF telemetry
+  # ----------------------------------------------------------
+  WorkerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "QueueMesh-Worker-${Environment}"
+      CodeUri: ../src/telemetry/
+      Handler: worker_mock.lambda_handler
+      Timeout: 10
+      MemorySize: 256
+      Description: >
+        Mock worker that simulates downstream API calls and emits
+        CloudWatch EMF telemetry for HTTP 200 / 429 response codes.
+      Environment:
+        Variables:
+          QUEUE_NAME: !Sub "QueueMesh-TargetQueue-${Environment}"
+          TARGET_VENDOR: MockVendor
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt TargetSQSQueue.QueueName
+      Tags:
+        Project: QueueMesh
+        Environment: !Ref Environment
+
+  # Explicit EventSourceMapping: allows direct reference of UUID & MaximumConcurrency
+  WorkerSQSEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt TargetSQSQueue.Arn
+      FunctionName: !GetAtt WorkerLambda.Arn
+      BatchSize: 10
+      ScalingConfig:
+        MaximumConcurrency: !Ref BaselineMaxConcurrency
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+
+  # ----------------------------------------------------------
+  # 4. CONTROLLER LAMBDA - AIMD control-loop brain
+  # ----------------------------------------------------------
+  QueueMeshControllerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "QueueMesh-Controller-${Environment}"
+      CodeUri: ../src/controller/
+      Handler: index.lambda_handler
+      Timeout: 10
+      MemorySize: 256
+      Description: >
+        Evaluates downstream error telemetry, applies the AIMD algorithm,
+        and dynamically updates the worker ESM MaximumConcurrency.
+      Environment:
+        Variables:
+          STATE_TABLE_NAME: !Sub "QueueMeshStateLedger-${Environment}"
+          WORKER_ESM_UUID: !Ref WorkerSQSEventSourceMapping
+          WORKER_FUNCTION_NAME: !Sub "QueueMesh-Worker-${Environment}"
+          BASELINE_MAX_CONCURRENCY: !Ref BaselineMaxConcurrency
+          ALPHA: !Ref AIMDAlpha
+          BETA: !Ref AIMDBeta
+          T1_THRESHOLD: !Ref T1Threshold
+          T2_THRESHOLD: !Ref T2Threshold
+          C_MIN: !Ref CMin
+          QUEUE_ID: !GetAtt TargetSQSQueue.QueueName
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref QueueMeshStateLedger
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: AllowESMReadUpdate
+              Effect: Allow
+              Action:
+                - lambda:GetEventSourceMapping
+                - lambda:UpdateEventSourceMapping
+              Resource:
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:${WorkerSQSEventSourceMapping}"
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*"
+            - Sid: AllowListESMs
+              Effect: Allow
+              Action:
+                - lambda:ListEventSourceMappings
+              Resource: "*"
+      Tags:
+        Project: QueueMesh
+        Environment: !Ref Environment
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+Outputs:
+  StateLedgerTableName:
+    Description: DynamoDB state ledger table name
+    Value: !Ref QueueMeshStateLedger
+    Export:
+      Name: !Sub "QueueMesh-StateLedger-${Environment}"
+
+  TargetQueueUrl:
+    Description: URL of the target SQS queue
+    Value: !Ref TargetSQSQueue
+    Export:
+      Name: !Sub "QueueMesh-TargetQueueUrl-${Environment}"
+
+  TargetQueueArn:
+    Description: ARN of the target SQS queue
+    Value: !GetAtt TargetSQSQueue.Arn
+    Export:
+      Name: !Sub "QueueMesh-TargetQueueArn-${Environment}"
+
+  DLQUrl:
+    Description: URL of the dead-letter queue
+    Value: !Ref TargetSQSDLQ
+
+  WorkerLambdaArn:
+    Description: ARN of the worker Lambda function
+    Value: !GetAtt WorkerLambda.Arn
+    Export:
+      Name: !Sub "QueueMesh-WorkerLambdaArn-${Environment}"
+
+  WorkerESMUUID:
+    Description: UUID of the SQS-to-Lambda Event Source Mapping
+    Value: !Ref WorkerSQSEventSourceMapping
+    Export:
+      Name: !Sub "QueueMesh-WorkerESMUUID-${Environment}"
+
+  ControllerLambdaArn:
+    Description: ARN of the QueueMesh controller Lambda function
+    Value: !GetAtt QueueMeshControllerFunction.Arn
+    Export:
+      Name: !Sub "QueueMesh-ControllerArn-${Environment}"
