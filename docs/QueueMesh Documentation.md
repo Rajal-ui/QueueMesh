@@ -207,40 +207,35 @@ The QueueMesh Controller runs a finite state machine stored in DynamoDB:
 ┌─────────────────┐
 │ Event Publisher │
 └────────┬────────┘
-         │ (Inbound Messages)
+         │ 1. Ingest Messages
          ▼
-┌─────────────────┐        Event Source Mapping         ┌───────────────────────────┐
-│ Amazon SQS      ├────────────────────────────────────►│ AWS Lambda Worker         │
-│ (Target Queue)  │◄──┐ (Dynamic MaximumConcurrency)    │ (Executes App Logic)      │
-└─────────────────┘   │                                 └─────────────┬─────────────┘
-                      │                                               │ Calls API
-                      │                                               ▼
-                      │                                 ┌───────────────────────────┐
-                      │                                 │ Downstream 3rd-Party API  │
-                      │                                 └─────────────┬─────────────┘
-                      │                                               │ Returns 429
-                      │                                               ▼
-                      │                                 ┌───────────────────────────┐
-                      │                                 │ CloudWatch EMF Logs       │
-                      │                                 └─────────────┬─────────────┘
-                      │                                               │ Filter
-                      │                                               ▼
-                      │                                 ┌───────────────────────────┐
-                      │                                 │ CloudWatch Metric Alarm / │
-                      │                                 │ EventBridge Rule          │
-                      │                                 └─────────────┬─────────────┘
-                      │                                               │ Triggers
-                      │                                               ▼
-                      │                                 ┌───────────────────────────┐
-                      │  Executes                       │ QueueMesh Controller      │
-                      └──UpdateEventSourceMapping───────┤ AWS Lambda                │
-                                                        └─────────────┬─────────────┘
-                                                                      │ Persists
-                                                                      ▼
-                                                        ┌───────────────────────────┐
-                                                        │ Amazon DynamoDB           │
-                                                        │ (State Ledger Table)      │
-                                                        └───────────────────────────┘
+┌─────────────────┐        2. Event Source Mapping        ┌───────────────────────────┐
+│ Amazon SQS      ├──────────────────────────────────────►│ AWS Lambda Worker         │
+│ (Target Queue)  │◄──┐   (Dynamic MaximumConcurrency)    │ (Executes App Logic)      │
+└─────────────────┘   │                                   └─────────────┬─────────────┘
+                      │                                                 │ 3. Call API
+                      │                                                 ▼
+                      │                                   ┌───────────────────────────┐
+                      │                                   │ Downstream 3rd-Party API  │
+                      │                                   │ (Stripe/Twilio/SendGrid)  │
+                      │                                   └─────────────┬─────────────┘
+                      │                                                 │ 4. HTTP 429 Response
+                      │                                                 ▼
+                      │                                   ┌───────────────────────────┐
+                      │                                   │ CloudWatch EMF Logs       │
+                      │                                   └─────────────┬─────────────┘
+                      │                                                 │ 5. Trigger Signal
+                      │                                                 ▼
+                      │  7. Update                        ┌───────────────────────────┐
+                      │     MaximumConcurrency            │ QueueMesh Controller      │
+                      └───────────────────────────────────┤ (AIMD Engine Lambda)      │
+                                                          └─────────────┬─────────────┘
+                                                                        │ 6. Persist Audit
+                                                                        ▼
+                                                          ┌───────────────────────────┐
+                                                          │ Amazon DynamoDB           │
+                                                          │ (State Ledger Table)      │
+                                                          └───────────────────────────┘
 ```
 
 ### 10.2 Repository Structure
