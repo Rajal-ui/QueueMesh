@@ -1,0 +1,14 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "QueueMesh"
+resolve_s3 = true
+s3_prefix = "QueueMesh"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=\"dev\" BaselineMaxConcurrency=\"100\" AIMDAlpha=\"5\" AIMDBeta=\"0.5\" T1Threshold=\"0.05\" T2Threshold=\"0.98\" CMin=\"2\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"
