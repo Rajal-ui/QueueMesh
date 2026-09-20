@@ -1,15 +1,23 @@
-# QueueMesh
+# 🚦 QueueMesh
 
-> **Serverless Adaptive Backpressure Controller for Amazon SQS and AWS Lambda**  
-> Dynamically regulates consumer concurrency in sub-second response times using real-time downstream HTTP error telemetry and the Additive Increase / Multiplicative Decrease (AIMD) algorithm.
+> **Self-healing serverless infrastructure protecting downstream APIs with sub-second backpressure—zero application code changes required.** 
+
+## Serverless Adaptive Backpressure Controller for Amazon SQS and AWS Lambda**  
+Dynamically regulates consumer concurrency in sub-second response times using real-time downstream HTTP error telemetry and the Additive Increase / Multiplicative Decrease (AIMD) algorithm.
+
+Built for the **Ship It** track at the WeMakeDevs "First Commit" AWS Hackathon.
+
+🎥 **[Watch the 3-Minute Demo Video](https://www.youtube.com/watch?v=5yX5kDagP4I)**  
+📝 **[Read the Full AWS Builder Center Blog Post](https://builder.aws.com/content/3JaMEmIqOXThP0lLGisL1w5XH3X/queuemesh-automated-serverless-backpressure-for-aws-lambda-and-sqs)**
 
 ---
 
-## 1. Executive Summary
+## 🛑 The "Infinite Scale" Problem
+AWS Lambda and Amazon SQS are incredible because they scale infinitely. But what happens when the downstream services you rely on *don't*?
 
-Modern serverless architectures frequently process asynchronous events through Amazon SQS coupled with AWS Lambda. When worker Lambdas make outbound requests to rate-limited downstream APIs (e.g., Stripe, Twilio, SendGrid, Shopify) or relational databases, high burst traffic quickly triggers **HTTP 429 (Too Many Requests)** errors.
+When Lambda scales out to hundreds of concurrent workers processing queue messages, downstream 3rd-party APIs (Stripe, Twilio, SendGrid, Shopify) or legacy relational databases get overwhelmed. They return **HTTP 429 (Too Many Requests)** or **HTTP 503** errors. 
 
-In standard AWS architectures, failed messages are retried as message visibility timeouts expire. As Lambda concurrency scales out to drain queue depth, it hammers downstream endpoints with higher request volume, initiating a destructive **retry storm**:
+Because of standard SQS behavior, failed messages go back into the queue for retry. Your Lambdas keep scaling, the API keeps rejecting them, and you enter a destructive **retry storm**:
 
 ```text
 [High Queue Depth] ──► [Worker Concurrency Scales Up] ──► [Downstream API Throttles (HTTP 429)]
@@ -17,11 +25,27 @@ In standard AWS architectures, failed messages are retried as message visibility
         └────────────── [Visibility Timeout Retry Storm] ◄─────────────────┘
 ```
 
-**QueueMesh** solves this problem without modifying worker application source code. It deploys an automated, closed-loop control plane that intercepts downstream error telemetry via **CloudWatch Embedded Metric Format (EMF)** and dynamically adjusts the SQS-to-Lambda Event Source Mapping `MaximumConcurrency` setting in **<1.5 seconds**.
+This leads to API key suspensions, DLQ spills, and 3 AM pager alerts. Fixing this traditionally requires manual intervention to dial down the queue concurrency in the AWS Console, taking 15 to 30 minutes.
 
 ---
 
-## 2. Solution Architecture
+## ✅ The QueueMesh Solution
+**QueueMesh** is an automated, real-time backpressure controller that sits above your worker Lambdas like a smart circuit breaker. 
+
+It monitors downstream HTTP response codes in real time. If it detects an HTTP 429 spike, it dynamically reaches into your AWS infrastructure and dials down the `MaximumConcurrency` of your SQS Event Source Mapping on the fly in **~300 milliseconds**.
+
+**Crucially, QueueMesh requires zero changes to your application source code.**
+
+---
+
+## 🏗️ AWS Serverless Architecture
+
+QueueMesh is deployed natively via **AWS SAM** and relies entirely on the AWS Free Tier.
+
+1. **Worker Telemetry (CloudWatch EMF):** Worker Lambdas emit asynchronous HTTP status logs using CloudWatch Embedded Metric Format (EMF) with $0$ ms performance penalty.
+2. **Signal Ingestion:** CloudWatch logs filter error rates and trigger the QueueMesh Controller Lambda.
+3. **Control Loop (AWS Lambda & Boto3):** When triggered, the Controller Lambda calculates the math engine (AIMD) and uses the Boto3 SDK to execute `update_event_source_mapping`.
+4. **Audit Ledger (Amazon DynamoDB):** A single-table design (`STATE#CURRENT` & `AUDIT#TIMESTAMP`) tracking real-time queue health and immutable transition histories.
 
 ```text
                                +-----------------------------+
@@ -58,9 +82,8 @@ In standard AWS architectures, failed messages are retried as message visibility
 
 ---
 
-## 3. Control-Loop Logic: AIMD Algorithm
-
-QueueMesh adapts TCP congestion control mathematics (**Additive Increase / Multiplicative Decrease**) specifically for AWS Lambda event source mappings:
+## 🧠 The Math Engine (AIMD)
+QueueMesh uses the **Additive Increase / Multiplicative Decrease (AIMD)** algorithm—the same math that prevents congestion on the global internet (TCP/IP), adapted specifically for AWS Lambda event source mappings.
 
 ```text
                          Downstream Error Telemetry
@@ -95,7 +118,7 @@ QueueMesh adapts TCP congestion control mathematics (**Additive Increase / Multi
 
 ---
 
-## 4. DynamoDB Single-Table Ledger Schema
+## 📊 DynamoDB Single-Table Ledger Schema
 
 QueueMesh tracks state and maintains an immutable audit log inside the `QueueMeshStateLedger` table:
 
@@ -106,40 +129,49 @@ QueueMesh tracks state and maintains an immutable audit log inside the `QueueMes
 
 ---
 
-## 5. Repository Structure
+## 📁 Repository Structure
 
 ```text
 QueueMesh/
 ├── infrastructure/
-│   └── template.yaml              # AWS SAM Infrastructure Template
+│   └── template.yaml               # AWS SAM template (DynamoDB, SQS, Worker ESM, Controller)
 ├── src/
 │   ├── controller/
-│   │   ├── aimd_engine.py         # Pure Python AIMD mathematical calculations
-│   │   └── index.py               # Controller Lambda (Boto3, DynamoDB, retry backoff)
+│   │   ├── aimd_engine.py          # Pure Python AIMD mathematical control-loop engine
+│   │   └── index.py                # Controller Lambda (Boto3, DynamoDB ledger, retry backoff)
 │   └── telemetry/
-│       └── worker_mock.py         # Worker Lambda with CloudWatch EMF telemetry generator
-├── samconfig.toml                 # SAM deployment configuration
-├── .gitignore                     # Git ignore rules (SAM, Python, credentials)
-└── README.md                      # Project documentation
+│       └── worker_mock.py          # Worker Lambda (CloudWatch EMF telemetry generator)
+├── docs/
+│   ├── AWS-inspect-guide.md        # Step-by-step AWS console inspection guide
+│   └── QueueMesh Documentation.md  # Full Architecture & PRD reference
+├── samconfig.toml                  # SAM deployment configuration
+├── .gitignore                      # Git ignore rules (SAM, Python, credentials)
+└── README.md                       # Project documentation
 ```
 
 ---
 
-## 6. Quickstart & Deployment
+## 🚀 Quick Start (Deployment)
+
+QueueMesh is packaged as an AWS SAM application.
 
 ### Prerequisites
 * [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) configured with active credentials
 * [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) (>= 1.100.0)
 * Python 3.11
 
-### Step 1: Build the Serverless Application
+### Step 1: Clone and Build
 ```bash
+git clone https://github.com/Rajal-ui/QueueMesh.git
+cd QueueMesh
+
+# Build the serverless application
 sam build -t infrastructure/template.yaml
 ```
 
 ### Step 2: Deploy to AWS
 ```bash
-# First-time interactive guided deploy
+# First-time interactive guided deploy (us-east-1 recommended)
 sam deploy --guided
 
 # Subsequent automated deployments
@@ -148,7 +180,7 @@ sam deploy
 
 ---
 
-## 7. Verification & Live Cloud Testing
+## 🧪 Verification & Live Cloud Testing
 
 Once deployed, you can verify the closed-loop control system directly using the AWS CLI:
 
@@ -200,14 +232,19 @@ aws dynamodb scan --table-name QueueMeshStateLedger-dev
 
 ---
 
-## 8. Key Performance & Resilience Indicators
+## 🏆Key Performance & Resilience Indicators 
 
-* **Turnaround Latency:** Total control-loop turnaround from telemetry ingestion to `UpdateEventSourceMapping` completion averages **270 ms – 570 ms** (well below the <1.5s SLA target).
+* **Verified Sub-Second Turnaround:** During the hackathon sprint, we verified that QueueMesh successfully executes a full state transition (Read DynamoDB $\rightarrow$ Calculate AIMD $\rightarrow$ Execute Boto3 Update $\rightarrow$ Write Audit Log) in **309.67 ms** (well below the <1.5s SLA target).
+* **Zero Overhead Telemetry:** Utilizing **CloudWatch Embedded Metric Format (EMF)** allows worker Lambdas to emit telemetry simply by printing formatted JSON to `stdout` with $0$ ms blocking I/O penalty.
 * **Fault Tolerance:** Incorporates an exponential retry loop with jitter to gracefully handle AWS Lambda `ResourceInUseException` during concurrent Event Source Mapping state transitions.
 * **Cost Efficiency:** Designed 100% within the AWS Free Tier (DynamoDB On-Demand + Lambda ARM64 compute).
 
 ---
 
-## 9. License
+## 📄 License
 
 This project is licensed under the MIT License.
+
+---
+
+*Built with ❤️ for the Bharat Builds Tour x AWS .*
